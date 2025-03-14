@@ -1,45 +1,61 @@
 import json
-from bs4 import BeautifulSoup
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer
 import re
+import os
 
-# Process the HTML file and write the information to a JSON
-# TODO: Write the information to a database
-# TODO: Store any additional information needed for the ranking algorithm
-def process_html_to_json(html_file, output_file):
-    with open(html_file, 'r') as f:
-        contents = f.read()
+CRAWLER_PIPE = "/tmp/crawler_pipe"
+STEMMER_PIPE = "/tmp/stemmer_pipe"
 
-    # Parse HTML
-    soup = BeautifulSoup(contents, "html.parser")
-    text = soup.get_text(separator=' ')
+def extract_words_from_html(html):
+    """Extract words from HTML, ignoring scripts and styles."""
+    from bs4 import BeautifulSoup
 
-    # Normalize whitespace
-    cleaned_text = re.sub(r'\s+', ' ', text)
-    # Remove special characters
-    cleaned_text = re.sub(r'[^a-zA-Z0-9\s]', '', cleaned_text)
-    # Convert everything to lowercase
-    cleaned_text = cleaned_text.lower()
+    soup = BeautifulSoup(html, "html.parser")
 
-    # Tokenize
-    tokens = word_tokenize(cleaned_text)
+    # Remove script and style elements
+    for script in soup(["script", "style"]):
+        script.extract()
 
-    # Remove stopwords
-    stop_words = set(stopwords.words('english'))
-    tokens = [token for token in tokens if token not in stop_words]
+    # Extract visible text and tokenize into words
+    text = soup.get_text(separator=" ")
+    words = re.findall(r'\b[a-zA-Z0-9]{2,}\b', text.lower())  # Extract words (at least 2 chars)
+    return words
 
-    # Stem the tokens
-    stemmer = PorterStemmer()
-    stemmed_tokens = [stemmer.stem(token) for token in tokens]
+def send_to_cpp(words, url):
+    """Send words + URL to the C++ program via named pipe."""
+    try:
+        with open(STEMMER_PIPE, "w") as pipe:
+            message = f"{url}\n" + "\n".join(words) + "\nEND_OF_ENTRY\n"
+            pipe.write(message)
+    except Exception as e:
+        print(f"Error writing to C++ pipe: {e}")
 
-    # Create JSON of data
-    output_data = {
-        "stemmed_tokens": stemmed_tokens
-    }
+def process_continuous_input():
+    """Continuously read from the crawler pipe and process data."""
+    with open(CRAWLER_PIPE, "r") as pipe:
+        while True:
+            line = pipe.readline().strip()
+            if not line:
+                continue  # Skip empty lines
 
-    # Write JSON to file
-    with open(output_file, 'w') as json_file:
-        json.dump(output_data, json_file, indent=4)
-    print(f"Processed data written to {output_file}")
+            try:
+                entry = json.loads(line)
+                url = entry["url"]
+                html = entry["html"]
+
+                # Extract words
+                words = extract_words_from_html(html)
+                if words:
+                    send_to_cpp(words, url)
+
+            except Exception as e:
+                print(f"Error processing entry: {e}")
+
+if __name__ == "__main__":
+    # Ensure named pipes exist
+    if not os.path.exists(CRAWLER_PIPE):
+        os.mkfifo(CRAWLER_PIPE)
+    if not os.path.exists(STEMMER_PIPE):
+        os.mkfifo(STEMMER_PIPE)
+
+    print("Listening for incoming web pages...")
+    process_continuous_input()
